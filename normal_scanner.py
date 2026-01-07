@@ -10,6 +10,50 @@ bl_info = {
 
 import bpy
 
+# Popup operator to display scan results
+class SCAN_OT_normal_maps_popup(bpy.types.Operator):
+    bl_idname = "scan.normal_maps_popup"
+    bl_label = "Normal Map Scan Results"
+    bl_options = {'INTERNAL'}
+
+    normal_maps: bpy.props.StringProperty()
+    material_usage: bpy.props.StringProperty()
+
+    def execute(self, context):
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=500)
+
+    def draw(self, context):
+        layout = self.layout
+        col = layout.column(align=True)
+        
+        # Parse the data
+        import json
+        try:
+            normal_maps = json.loads(self.normal_maps) if self.normal_maps else []
+            material_usage = json.loads(self.material_usage) if self.material_usage else []
+        except:
+            normal_maps = []
+            material_usage = []
+        
+        # Show normal maps list
+        col.label(text=f"Normal Maps Found ({len(normal_maps)}):", icon='TEXTURE')
+        box = col.box()
+        for nm in sorted(normal_maps):
+            box.label(text=f"  • {nm}")
+        
+        # Show materials using normal maps
+        if material_usage:
+            col.separator()
+            col.label(text=f"Materials Using Normal Maps ({len(material_usage)}):", icon='MATERIAL')
+            box = col.box()
+            for mat_name, textures in sorted(material_usage, key=lambda x: x[0]):
+                box.label(text=f"  {mat_name}:", icon='MATERIAL_DATA')
+                for tex in textures:
+                    box.label(text=f"    → {tex}")
+
 # Operator to scan normal maps
 class SCAN_OT_normal_maps(bpy.types.Operator):
     bl_idname = "object.scan_normal_maps"
@@ -40,10 +84,14 @@ class SCAN_OT_normal_maps(bpy.types.Operator):
 
         # Report results
         if normal_maps:
-            message = f"Normal maps found: {', '.join(normal_maps)}"
+            # Build report message with materials
+            message = f"Found {len(normal_maps)} normal map(s)"
+            if material_usage:
+                message += f" in {len(material_usage)} material(s)"
             self.report({'INFO'}, message)
+            
             print("\n--- Normal Maps in Scene ---")
-            for nm in normal_maps:
+            for nm in sorted(normal_maps):
                 print(" -", nm)
 
             if material_usage:
@@ -52,6 +100,23 @@ class SCAN_OT_normal_maps(bpy.types.Operator):
                     print(f"{mat_name}:")
                     for tex in textures:
                         print(f"   - {tex}")
+
+            # Show a popup so results are visible without checking the console
+            import json
+            # Store data temporarily for the popup
+            normal_maps_list = sorted(list(normal_maps))
+            material_usage_list = material_usage
+            
+            # Use a timer to show popup after operator finishes
+            def show_popup():
+                bpy.ops.scan.normal_maps_popup(
+                    'INVOKE_DEFAULT',
+                    normal_maps=json.dumps(normal_maps_list),
+                    material_usage=json.dumps(material_usage_list)
+                )
+                return None  # Timer runs once
+            
+            bpy.app.timers.register(show_popup, first_interval=0.01)
         else:
             self.report({'INFO'}, "No normal maps found in the scene")
             print("No normal maps found in the scene")
@@ -120,6 +185,102 @@ class SCAN_OT_remove_normal_maps(bpy.types.Operator):
 
         return {'FINISHED'}
 
+# Operator to fix UV coordinates for glTF export
+class SCAN_OT_fix_uv_coordinates(bpy.types.Operator):
+    bl_idname = "object.fix_uv_coordinates"
+    bl_label = "Fix UV Coordinates for glTF"
+    bl_description = "Add UV coordinates to meshes that have textured materials but no UV mapping"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        fixed_count = 0
+        meshes_fixed = []
+        
+        # Store original selection and active object
+        original_selection = [obj for obj in context.selected_objects]
+        original_active = context.active_object
+        
+        # Deselect all objects first
+        bpy.ops.object.select_all(action='DESELECT')
+        
+        def has_texture_in_material(material):
+            """Check if a material uses any texture nodes"""
+            if not material or not material.use_nodes or not material.node_tree:
+                return False
+            
+            for node in material.node_tree.nodes:
+                if node.type == 'TEX_IMAGE' and node.image:
+                    return True
+            return False
+        
+        # Check all mesh objects
+        for obj in context.scene.objects:
+            if obj.type != 'MESH':
+                continue
+            
+            mesh = obj.data
+            needs_uv = False
+            
+            # Check if mesh has UV coordinates
+            has_uv = len(mesh.uv_layers) > 0
+            
+            # Check if any material uses textures
+            if obj.data.materials:
+                for mat in obj.data.materials:
+                    if has_texture_in_material(mat):
+                        needs_uv = True
+                        break
+            
+            # If material has textures but mesh has no UV, add UV coordinates
+            if needs_uv and not has_uv:
+                # Select the object
+                obj.select_set(True)
+                context.view_layer.objects.active = obj
+                
+                # Enter Edit mode
+                bpy.ops.object.mode_set(mode='EDIT')
+                
+                # Select all faces
+                bpy.ops.mesh.select_all(action='SELECT')
+                
+                # Add UV coordinates using Smart UV Project
+                bpy.ops.uv.smart_project(
+                    angle_limit=66.0,
+                    island_margin=0.0,
+                    user_area_weight=0.0,
+                    use_aspect=True,
+                    stretch_to_bounds=False
+                )
+                
+                # Return to Object mode
+                bpy.ops.object.mode_set(mode='OBJECT')
+                
+                # Deselect
+                obj.select_set(False)
+                
+                fixed_count += 1
+                meshes_fixed.append(obj.name)
+        
+        # Restore original selection
+        bpy.ops.object.select_all(action='DESELECT')
+        for obj in original_selection:
+            obj.select_set(True)
+        if original_active:
+            context.view_layer.objects.active = original_active
+        
+        # Report results
+        if fixed_count > 0:
+            self.report({'INFO'}, f"Fixed UV coordinates for {fixed_count} mesh(es)")
+            print(f"\n--- Fixed UV Coordinates ---")
+            print(f"Successfully added UV coordinates to {fixed_count} mesh(es):")
+            for name in meshes_fixed:
+                print(f"  - {name}")
+        else:
+            self.report({'INFO'}, "All meshes already have UV coordinates")
+            print("All meshes already have UV coordinates or don't need them")
+        
+        return {'FINISHED'}
+
 # UI Panel
 class SCAN_PT_panel(bpy.types.Panel):
     bl_label = "Normal Map Scanner"
@@ -132,9 +293,13 @@ class SCAN_PT_panel(bpy.types.Panel):
         layout = self.layout
         layout.operator("object.scan_normal_maps")
         layout.operator("object.remove_normal_maps")
+        
+        layout.separator()
+        layout.label(text="glTF Export Tools:", icon='EXPORT')
+        layout.operator("object.fix_uv_coordinates", icon='UV_DATA')
 
 # Register classes
-    classes = [SCAN_OT_normal_maps, SCAN_OT_remove_normal_maps, SCAN_PT_panel]
+classes = [SCAN_OT_normal_maps_popup, SCAN_OT_normal_maps, SCAN_OT_remove_normal_maps, SCAN_OT_fix_uv_coordinates, SCAN_PT_panel]
 
 def register():
     for cls in classes:
