@@ -410,6 +410,221 @@ class SCAN_OT_remove_unused_textures(bpy.types.Operator):
         
         return {'FINISHED'}
 
+# Operator to remove unused materials
+class SCAN_OT_remove_unused_materials(bpy.types.Operator):
+    bl_idname = "object.remove_unused_materials"
+    bl_label = "Remove Unused Materials"
+    bl_description = "Remove all materials that are not assigned to any mesh object"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        removed_count = 0
+        removed_materials = []
+        
+        # Get all materials used in mesh objects
+        used_materials = set()
+        
+        for obj in bpy.data.objects:
+            if obj.type == 'MESH' and obj.data.materials:
+                for mat in obj.data.materials:
+                    if mat:
+                        used_materials.add(mat.name)
+        
+        # Find and remove unused materials
+        materials_to_remove = []
+        for mat in bpy.data.materials:
+            if mat.name not in used_materials:
+                materials_to_remove.append(mat)
+        
+        # Remove unused materials
+        for mat in materials_to_remove:
+            removed_materials.append(mat.name)
+            bpy.data.materials.remove(mat)
+            removed_count += 1
+        
+        # Report results
+        if removed_count > 0:
+            self.report({'INFO'}, f"Removed {removed_count} unused material(s)")
+            print(f"\n--- Removed Unused Materials ---")
+            print(f"Removed {removed_count} unused material(s):")
+            for name in removed_materials:
+                print(f"  - {name}")
+        else:
+            self.report({'INFO'}, "No unused materials found")
+            print("No unused materials found")
+        
+        return {'FINISHED'}
+
+# Operator to pack images and export as FBX
+class SCAN_OT_export_fbx_with_textures(bpy.types.Operator):
+    bl_idname = "object.export_fbx_with_textures"
+    bl_label = "Export FBX with Textures"
+    bl_description = "Pack all images and export as FBX with textures"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    filepath: bpy.props.StringProperty(
+        name="File Path",
+        description="Filepath used for exporting the FBX file",
+        maxlen=1024,
+        default="",
+        subtype='FILE_PATH'
+    )
+    
+    def invoke(self, context, event):
+        # Set default filename
+        if not self.filepath:
+            blend_filepath = bpy.data.filepath
+            if blend_filepath:
+                import os
+                filepath = os.path.splitext(blend_filepath)[0] + ".fbx"
+            else:
+                filepath = "untitled.fbx"
+            self.filepath = filepath
+        
+        # Open file browser
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+    
+    def execute(self, context):
+        import os
+        
+        # Get directory and base name for FBX file
+        fbx_dir = os.path.dirname(self.filepath)
+        fbx_basename = os.path.splitext(os.path.basename(self.filepath))[0]
+        
+        # Create textures folder next to FBX file
+        textures_dir = os.path.join(fbx_dir, fbx_basename + "_textures")
+        os.makedirs(textures_dir, exist_ok=True)
+        
+        saved_count = 0
+        saved_images = []
+        
+        # Get all images used in materials
+        used_images = set()
+        for mat in bpy.data.materials:
+            if mat.use_nodes and mat.node_tree:
+                for node in mat.node_tree.nodes:
+                    if node.type == 'TEX_IMAGE' and node.image:
+                        used_images.add(node.image)
+        
+        # Save all used images to disk
+        print("\n=== Saving Images to Disk ===")
+        for img in used_images:
+            if img.name in ["Render Result", "Viewer Node"]:
+                continue
+            
+            if not img.has_data:
+                continue
+            
+            try:
+                # Create safe filename
+                safe_name = "".join(c for c in img.name if c.isalnum() or c in (' ', '-', '_', '.')).rstrip()
+                
+                # Determine file extension based on original format or default to PNG
+                if img.filepath:
+                    ext = os.path.splitext(img.filepath)[1].lower()
+                    if ext in ['.jpg', '.jpeg', '.png', '.tga', '.bmp']:
+                        file_ext = ext
+                    else:
+                        file_ext = '.png'
+                else:
+                    # Default to PNG if no filepath
+                    file_ext = '.png'
+                
+                # If image is packed, unpack it first
+                if img.packed_file:
+                    img.unpack(method='USE_ORIGINAL')
+                
+                # Save image to textures folder
+                texture_path = os.path.join(textures_dir, safe_name + file_ext)
+                
+                # Ensure unique filename
+                counter = 1
+                original_path = texture_path
+                while os.path.exists(texture_path):
+                    name_part = os.path.splitext(original_path)[0]
+                    texture_path = f"{name_part}_{counter}{file_ext}"
+                    counter += 1
+                
+                # Set image filepath and format
+                img.filepath = texture_path
+                if file_ext in ['.jpg', '.jpeg']:
+                    img.file_format = 'JPEG'
+                elif file_ext == '.png':
+                    img.file_format = 'PNG'
+                elif file_ext == '.tga':
+                    img.file_format = 'TARGA'
+                
+                # Save the image
+                img.save()
+                
+                saved_count += 1
+                saved_images.append(os.path.basename(texture_path))
+                print(f"Saved: {os.path.basename(texture_path)}")
+                
+            except Exception as e:
+                print(f"Failed to save {img.name}: {e}")
+        
+        if saved_count > 0:
+            self.report({'INFO'}, f"Saved {saved_count} texture(s) to disk")
+            print(f"Saved {saved_count} texture(s) to: {textures_dir}")
+        
+        # Export as FBX
+        print(f"\n=== Exporting FBX ===")
+        print(f"Exporting to: {self.filepath}")
+        
+        try:
+            # Export FBX with textures
+            bpy.ops.export_scene.fbx(
+                filepath=self.filepath,
+                check_existing=True,
+                filter_glob="*.fbx",
+                use_selection=False,
+                use_active_collection=False,
+                global_scale=1.0,
+                apply_unit_scale=True,
+                apply_scale_options='FBX_SCALE_NONE',
+                use_space_transform=True,
+                bake_space_transform=False,
+                object_types={'MESH', 'ARMATURE', 'EMPTY', 'OTHER'},
+                use_mesh_modifiers=True,
+                use_mesh_modifiers_render=True,
+                mesh_smooth_type='OFF',
+                use_subsurf=False,
+                use_mesh_edges=False,
+                use_tspace=False,
+                use_custom_props=False,
+                add_leaf_bones=True,
+                primary_bone_axis='Y',
+                secondary_bone_axis='X',
+                use_armature_deform_only=False,
+                armature_nodetype='NULL',
+                bake_anim=True,
+                bake_anim_use_all_bones=True,
+                bake_anim_use_nla_strips=True,
+                bake_anim_use_all_actions=True,
+                bake_anim_force_startend_keying=True,
+                bake_anim_step=1.0,
+                bake_anim_simplify_factor=1.0,
+                path_mode='COPY',  # Copy textures relative to FBX
+                embed_textures=False,  # Don't embed, use external files
+                batch_mode='OFF',
+                use_batch_own_dir=True,
+                use_metadata=True
+            )
+            
+            self.report({'INFO'}, f"Exported FBX with {saved_count} texture(s)")
+            print(f"✓ Successfully exported FBX!")
+            print(f"✓ Textures saved to: {textures_dir}")
+            print(f"  Keep the '{fbx_basename}_textures' folder with the FBX file!")
+            
+        except Exception as e:
+            self.report({'ERROR'}, f"Export failed: {str(e)}")
+            print(f"✗ Export failed: {e}")
+            return {'CANCELLED'}
+        
+        return {'FINISHED'}
+
 # UI Panel
 class SCAN_PT_panel(bpy.types.Panel):
     bl_label = "Normal Map Scanner"
@@ -426,6 +641,11 @@ class SCAN_PT_panel(bpy.types.Panel):
         layout.separator()
         layout.label(text="Cleanup Tools:", icon='BRUSH_DATA')
         layout.operator("object.remove_unused_textures", icon='TRASH')
+        layout.operator("object.remove_unused_materials", icon='MATERIAL_DATA')
+        
+        layout.separator()
+        layout.label(text="Export Tools:", icon='EXPORT')
+        layout.operator("object.export_fbx_with_textures", icon='EXPORT')
         
         layout.separator()
         layout.label(text="glTF Export Tools:", icon='EXPORT')
@@ -433,7 +653,7 @@ class SCAN_PT_panel(bpy.types.Panel):
         layout.operator("object.fix_image_dimensions", icon='IMAGE_DATA')
 
 # Register classes
-classes = [SCAN_OT_normal_maps_popup, SCAN_OT_normal_maps, SCAN_OT_remove_normal_maps, SCAN_OT_fix_uv_coordinates, SCAN_OT_fix_image_dimensions, SCAN_OT_remove_unused_textures, SCAN_PT_panel]
+classes = [SCAN_OT_normal_maps_popup, SCAN_OT_normal_maps, SCAN_OT_remove_normal_maps, SCAN_OT_fix_uv_coordinates, SCAN_OT_fix_image_dimensions, SCAN_OT_remove_unused_textures, SCAN_OT_remove_unused_materials, SCAN_OT_export_fbx_with_textures, SCAN_PT_panel]
 
 def register():
     for cls in classes:
