@@ -193,15 +193,11 @@ class SCAN_OT_fix_uv_coordinates(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
+        import bmesh
+        from mathutils import Vector
+        
         fixed_count = 0
         meshes_fixed = []
-        
-        # Store original selection and active object
-        original_selection = [obj for obj in context.selected_objects]
-        original_active = context.active_object
-        
-        # Deselect all objects first
-        bpy.ops.object.select_all(action='DESELECT')
         
         def has_texture_in_material(material):
             """Check if a material uses any texture nodes"""
@@ -213,8 +209,44 @@ class SCAN_OT_fix_uv_coordinates(bpy.types.Operator):
                     return True
             return False
         
+        def add_box_uv(mesh):
+            """Add simple box projection UV coordinates to a mesh"""
+            # Skip empty meshes
+            if len(mesh.polygons) == 0 or len(mesh.vertices) == 0:
+                return False
+            
+            # Create UV layer if it doesn't exist
+            if not mesh.uv_layers:
+                mesh.uv_layers.new(name="UVMap")
+            
+            uv_layer = mesh.uv_layers.active.data
+            
+            # Simple box projection based on face normals
+            for poly in mesh.polygons:
+                normal = poly.normal
+                
+                # Determine dominant axis for projection
+                abs_normal = [abs(normal.x), abs(normal.y), abs(normal.z)]
+                max_axis = abs_normal.index(max(abs_normal))
+                
+                for loop_idx in poly.loop_indices:
+                    loop = mesh.loops[loop_idx]
+                    vert = mesh.vertices[loop.vertex_index]
+                    co = vert.co
+                    
+                    # Project based on dominant axis
+                    if max_axis == 0:  # X dominant - project on YZ
+                        uv = (co.y, co.z)
+                    elif max_axis == 1:  # Y dominant - project on XZ
+                        uv = (co.x, co.z)
+                    else:  # Z dominant - project on XY
+                        uv = (co.x, co.y)
+                    
+                    uv_layer[loop_idx].uv = uv
+            return True
+        
         # Check all mesh objects
-        for obj in context.scene.objects:
+        for obj in bpy.data.objects:
             if obj.type != 'MESH':
                 continue
             
@@ -233,40 +265,12 @@ class SCAN_OT_fix_uv_coordinates(bpy.types.Operator):
             
             # If material has textures but mesh has no UV, add UV coordinates
             if needs_uv and not has_uv:
-                # Select the object
-                obj.select_set(True)
-                context.view_layer.objects.active = obj
-                
-                # Enter Edit mode
-                bpy.ops.object.mode_set(mode='EDIT')
-                
-                # Select all faces
-                bpy.ops.mesh.select_all(action='SELECT')
-                
-                # Add UV coordinates using Smart UV Project
-                bpy.ops.uv.smart_project(
-                    angle_limit=66.0,
-                    island_margin=0.0,
-                    user_area_weight=0.0,
-                    use_aspect=True,
-                    stretch_to_bounds=False
-                )
-                
-                # Return to Object mode
-                bpy.ops.object.mode_set(mode='OBJECT')
-                
-                # Deselect
-                obj.select_set(False)
-                
-                fixed_count += 1
-                meshes_fixed.append(obj.name)
-        
-        # Restore original selection
-        bpy.ops.object.select_all(action='DESELECT')
-        for obj in original_selection:
-            obj.select_set(True)
-        if original_active:
-            context.view_layer.objects.active = original_active
+                try:
+                    if add_box_uv(mesh):
+                        fixed_count += 1
+                        meshes_fixed.append(obj.name)
+                except Exception as e:
+                    print(f"Failed to add UV to {obj.name}: {e}")
         
         # Report results
         if fixed_count > 0:
@@ -278,6 +282,131 @@ class SCAN_OT_fix_uv_coordinates(bpy.types.Operator):
         else:
             self.report({'INFO'}, "All meshes already have UV coordinates")
             print("All meshes already have UV coordinates or don't need them")
+        
+        return {'FINISHED'}
+
+# Operator to fix image dimensions for glTF export
+class SCAN_OT_fix_image_dimensions(bpy.types.Operator):
+    bl_idname = "object.fix_image_dimensions"
+    bl_label = "Fix Image Dimensions for glTF"
+    bl_description = "Resize images to power-of-2 dimensions for glTF compatibility"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        fixed_count = 0
+        images_fixed = []
+        
+        def nearest_power_of_2(n):
+            """Find the nearest power of 2 to n"""
+            if n <= 0:
+                return 1
+            # Find lower and upper power of 2
+            lower = 1
+            while lower * 2 <= n:
+                lower *= 2
+            upper = lower * 2
+            # Return the closer one
+            if n - lower < upper - n:
+                return lower
+            return upper
+        
+        def is_power_of_2(n):
+            """Check if n is a power of 2"""
+            return n > 0 and (n & (n - 1)) == 0
+        
+        # Check all images
+        for img in bpy.data.images:
+            # Skip internal images
+            if img.name in ["Render Result", "Viewer Node"]:
+                continue
+            
+            width, height = img.size[0], img.size[1]
+            
+            # Skip if already valid (power of 2 or square)
+            if width == 0 or height == 0:
+                continue
+            
+            needs_fix = False
+            new_width = width
+            new_height = height
+            
+            # Check if dimensions need fixing
+            if not is_power_of_2(width):
+                new_width = nearest_power_of_2(width)
+                needs_fix = True
+            
+            if not is_power_of_2(height):
+                new_height = nearest_power_of_2(height)
+                needs_fix = True
+            
+            if needs_fix:
+                try:
+                    # Scale the image
+                    img.scale(new_width, new_height)
+                    fixed_count += 1
+                    images_fixed.append(f"{img.name}: {width}x{height} -> {new_width}x{new_height}")
+                except Exception as e:
+                    print(f"Failed to resize {img.name}: {e}")
+        
+        # Report results
+        if fixed_count > 0:
+            self.report({'INFO'}, f"Fixed {fixed_count} image(s) dimensions")
+            print(f"\n--- Fixed Image Dimensions ---")
+            print(f"Resized {fixed_count} image(s) to power-of-2 dimensions:")
+            for info in images_fixed:
+                print(f"  - {info}")
+        else:
+            self.report({'INFO'}, "All images already have valid dimensions")
+            print("All images already have power-of-2 dimensions")
+        
+        return {'FINISHED'}
+
+# Operator to remove unused textures/images
+class SCAN_OT_remove_unused_textures(bpy.types.Operator):
+    bl_idname = "object.remove_unused_textures"
+    bl_label = "Remove Unused Textures"
+    bl_description = "Remove all textures/images that are not used in any material"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        removed_count = 0
+        removed_images = []
+        
+        # Get all images used in materials
+        used_images = set()
+        
+        for mat in bpy.data.materials:
+            if mat.use_nodes and mat.node_tree:
+                for node in mat.node_tree.nodes:
+                    if node.type == 'TEX_IMAGE' and node.image:
+                        used_images.add(node.image.name)
+        
+        # Find and remove unused images
+        images_to_remove = []
+        for img in bpy.data.images:
+            # Skip internal images
+            if img.name in ["Render Result", "Viewer Node"]:
+                continue
+            
+            if img.name not in used_images:
+                images_to_remove.append(img)
+        
+        # Remove unused images
+        for img in images_to_remove:
+            removed_images.append(img.name)
+            bpy.data.images.remove(img)
+            removed_count += 1
+        
+        # Report results
+        if removed_count > 0:
+            self.report({'INFO'}, f"Removed {removed_count} unused texture(s)")
+            print(f"\n--- Removed Unused Textures ---")
+            print(f"Removed {removed_count} unused texture(s):")
+            for name in removed_images:
+                print(f"  - {name}")
+        else:
+            self.report({'INFO'}, "No unused textures found")
+            print("No unused textures found")
         
         return {'FINISHED'}
 
@@ -295,11 +424,16 @@ class SCAN_PT_panel(bpy.types.Panel):
         layout.operator("object.remove_normal_maps")
         
         layout.separator()
+        layout.label(text="Cleanup Tools:", icon='BRUSH_DATA')
+        layout.operator("object.remove_unused_textures", icon='TRASH')
+        
+        layout.separator()
         layout.label(text="glTF Export Tools:", icon='EXPORT')
         layout.operator("object.fix_uv_coordinates", icon='UV_DATA')
+        layout.operator("object.fix_image_dimensions", icon='IMAGE_DATA')
 
 # Register classes
-classes = [SCAN_OT_normal_maps_popup, SCAN_OT_normal_maps, SCAN_OT_remove_normal_maps, SCAN_OT_fix_uv_coordinates, SCAN_PT_panel]
+classes = [SCAN_OT_normal_maps_popup, SCAN_OT_normal_maps, SCAN_OT_remove_normal_maps, SCAN_OT_fix_uv_coordinates, SCAN_OT_fix_image_dimensions, SCAN_OT_remove_unused_textures, SCAN_PT_panel]
 
 def register():
     for cls in classes:
